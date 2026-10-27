@@ -51,7 +51,7 @@ A monitor describes itself to the Mac with an EDID, which carries a product ID. 
 
 | Product ID | Setting | Refresh rate up to | macOS |
 | --- | --- | --- | --- |
-| `0x7306` | Input Signal Plus off (likely) | 75Hz | works |
+| `0x7306` | Input Signal Plus off | 75Hz | works |
 | `0x72F5` | Game Mode off | 120Hz | works |
 | `0x72F2` | Game Mode on | 175Hz | never turns it on |
 

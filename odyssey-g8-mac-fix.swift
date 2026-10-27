@@ -187,6 +187,9 @@ final class Watchdog {
   // One set for the monitor, not one per service. An override can make the monitor reconnect as a new service,
   // and a set per service would apply the same EDIDs in a loop.
   var tried: Set<Identity> = []
+  // Above zero exactly while a chain of checks runs. A connect clears tried only at zero,
+  // so a reconnect during a chain cannot apply the same EDIDs in a loop.
+  var pendingChecks = 0
 
   func takeNext(from saved: [SavedEDID], current: Data) -> SavedEDID? {
     guard let next = saved.first(where: { !tried.contains($0.identity) && $0.edid != current }) else { return nil }
@@ -212,15 +215,18 @@ final class Watchdog {
   }
 
   func connected(_ display: Display) {
+    if pendingChecks == 0 { tried = [] }
     replaceIfRejected(display)
     if Identity(edid: display.edid)?.vendor == samsung { checkLater(display.id) }
   }
 
   func checkLater(_ id: UInt64) {
+    pendingChecks += 1
     DispatchQueue.main.asyncAfter(deadline: .now() + onlineGracePeriod) { self.check(id) }
   }
 
   func check(_ id: UInt64) {
+    pendingChecks -= 1
     let service = IOServiceGetMatchingService(kIOMainPortDefault, IORegistryEntryIDMatching(id))
     guard service != 0 else { return say("\(serviceName(id)): gone, stopped checking") }
     defer { IOObjectRelease(service) }
