@@ -116,10 +116,11 @@ let setVirtualEDID = privateFunction(
   "IOAVServiceSetVirtualEDIDMode", (@convention(c) (CFTypeRef, UInt32, CFData?) -> IOReturn).self)
 
 struct Display {
-  let name: String
+  let id: UInt64
   let av: CFTypeRef
   let edid: Data
 
+  var name: String { serviceName(id) }
   var identity: String { Identity(edid: edid).map(String.init(describing:)) ?? "unrecognized \(edid.count)-byte EDID" }
 }
 
@@ -127,13 +128,16 @@ struct Display {
 let edidAttempts = 10
 let edidRetryDelay = 0.5
 
-func readDisplay(_ service: io_service_t, name: String) -> Display? {
+func serviceName(_ id: UInt64) -> String { String(format: "service 0x%llx", id) }
+
+func readDisplay(_ service: io_service_t, id: UInt64) -> Display? {
+  let name = serviceName(id)
   for attempt in 1...edidAttempts {
     var out: Unmanaged<CFData>?
     if let av = createAVService(kCFAllocatorDefault, service)?.takeRetainedValue(),
       copyEDID(av, &out) == kIOReturnSuccess, let edid = out?.takeRetainedValue() as Data?
     {
-      return Display(name: name, av: av, edid: edid)
+      return Display(id: id, av: av, edid: edid)
     }
     say("\(name): EDID not readable yet, try \(attempt) of \(edidAttempts)")
     if attempt < edidAttempts { Thread.sleep(forTimeInterval: edidRetryDelay) }
@@ -150,7 +154,7 @@ func eachExternalDisplay(_ iterator: io_iterator_t, _ body: (Display) -> Void) {
     guard location == "External" else { continue }
     var id: UInt64 = 0
     IORegistryEntryGetRegistryEntryID(service, &id)
-    if let display = readDisplay(service, name: String(format: "service 0x%llx", id)) { body(display) }
+    if let display = readDisplay(service, id: id) { body(display) }
   }
 }
 
@@ -169,30 +173,81 @@ func onlineIdentities() -> Set<Identity> {
   return Set(displays.prefix(Int(count)).map(Identity.init(display:)))
 }
 
+func isOnline(_ edid: Data) -> Bool { Identity(edid: edid).map(onlineIdentities().contains) ?? false }
+
 func report(_ display: Display, _ verdict: Verdict) {
   say("\(display.name): \(display.identity), \(verdict.rawValue)")
 }
 
-// Reads the saved EDIDs on every connect, so an EDID captured while the helper runs takes effect without a restart.
-func reconcile(_ display: Display) {
-  let saved = loadSavedEDIDs()
-  let verdict = verdict(display.edid, saved: saved)
-  report(display, verdict)
-  guard verdict == .replace else { return }
-  guard let replacement = saved.first else { return say("\(display.name): no saved EDID to apply") }
-  say("\(display.name): applied saved \(replacement.identity), IOReturn \(hex(setVirtualEDID(display.av, 1, replacement.edid as CFData)))")
+// macOS turns on a display with a working EDID within about a second.
+let onlineGracePeriod: TimeInterval = 5
+
+// Reads the saved EDIDs at every step, so an EDID captured while the helper runs takes effect without a restart.
+final class Watchdog {
+  // One set for the monitor, not one per service. An override can make the monitor reconnect as a new service,
+  // and a set per service would apply the same EDIDs in a loop.
+  var tried: Set<Identity> = []
+
+  func takeNext(from saved: [SavedEDID], current: Data) -> SavedEDID? {
+    guard let next = saved.first(where: { !tried.contains($0.identity) && $0.edid != current }) else { return nil }
+    tried.insert(next.identity)
+    return next
+  }
+
+  @discardableResult
+  func applyNext(to display: Display, from saved: [SavedEDID]) -> Bool {
+    guard let next = takeNext(from: saved, current: display.edid) else {
+      say("\(display.name): no saved EDID left to try since the monitor was last on")
+      return false
+    }
+    say("\(display.name): applied saved \(next.identity), IOReturn \(hex(setVirtualEDID(display.av, 1, next.edid as CFData)))")
+    return true
+  }
+
+  func replaceIfRejected(_ display: Display) {
+    let saved = loadSavedEDIDs()
+    let verdict = verdict(display.edid, saved: saved)
+    report(display, verdict)
+    if verdict == .replace { applyNext(to: display, from: saved) }
+  }
+
+  func connected(_ display: Display) {
+    replaceIfRejected(display)
+    if Identity(edid: display.edid)?.vendor == samsung { checkLater(display.id) }
+  }
+
+  func checkLater(_ id: UInt64) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + onlineGracePeriod) { self.check(id) }
+  }
+
+  func check(_ id: UInt64) {
+    let service = IOServiceGetMatchingService(kIOMainPortDefault, IORegistryEntryIDMatching(id))
+    guard service != 0 else { return say("\(serviceName(id)): gone, stopped checking") }
+    defer { IOObjectRelease(service) }
+    guard let display = readDisplay(service, id: id) else { return }
+    if isOnline(display.edid) {
+      tried = []
+      return say("\(display.name): \(display.identity), online")
+    }
+    say("\(display.name): \(display.identity), not online after \(Int(onlineGracePeriod)) s")
+    if applyNext(to: display, from: loadSavedEDIDs()) { checkLater(id) }
+  }
 }
 
 func watch() {
+  let watchdog = Watchdog()
   let port = IONotificationPortCreate(kIOMainPortDefault)
   CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(port).takeUnretainedValue(), .defaultMode)
+  let context = Unmanaged.passRetained(watchdog).toOpaque()
   var iterator: io_iterator_t = 0
   let result = IOServiceAddMatchingNotification(
     port, kIOFirstMatchNotification, IOServiceMatching("DCPAVServiceProxy"),
-    { _, iterator in eachExternalDisplay(iterator, reconcile) }, nil, &iterator)
+    { context, iterator in
+      eachExternalDisplay(iterator, Unmanaged<Watchdog>.fromOpaque(context!).takeUnretainedValue().connected)
+    }, context, &iterator)
   guard result == KERN_SUCCESS else { fail("Could not watch for displays, IOReturn \(hex(result))") }
   say("watching for displays, \(describe(loadSavedEDIDs()))")
-  eachExternalDisplay(iterator, reconcile)
+  eachExternalDisplay(iterator, watchdog.connected)
   CFRunLoopRun()
 }
 
@@ -234,14 +289,12 @@ switch CommandLine.arguments.dropFirst().first {
 case "watch":
   watch()
 case "apply":
-  eachExternalDisplay(connectedServices(), reconcile)
+  eachExternalDisplay(connectedServices(), Watchdog().replaceIfRejected)
 case "status":
   let saved = loadSavedEDIDs()
-  let online = onlineIdentities()
   eachExternalDisplay(connectedServices()) { display in
     let verdict = verdict(display.edid, saved: saved)
-    let isOnline = Identity(edid: display.edid).map(online.contains) ?? false
-    say("\(display.name): \(display.identity), \(verdict.rawValue), \(isOnline ? "online" : "not online")")
+    say("\(display.name): \(display.identity), \(verdict.rawValue), \(isOnline(display.edid) ? "online" : "not online")")
   }
   say(describe(saved))
 case "capture":

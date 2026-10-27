@@ -49,3 +49,4 @@ EOF
 
 launchctl bootstrap "$domain" "$plist"
 echo "Installed. The log is at $log"
+echo "To also save the 75Hz EDID for the safety net, turn Input Signal Plus off, wait for the picture, and run \"$dest/odyssey-g8-mac-fix\" capture"

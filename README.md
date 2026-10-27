@@ -16,6 +16,13 @@ You need an Apple Silicon Mac and the Xcode Command Line Tools (`xcode-select --
    ```
 
 3. Turn Game Mode on. The screen goes black for about a second, then comes back.
+4. Optionally, save the 75Hz EDID as well. The helper falls back to it if the monitor stays black. Turn Input Signal Plus off and wait for the picture. Then run:
+
+   ```
+   "$HOME/Library/Application Support/odyssey-g8-mac-fix/odyssey-g8-mac-fix" capture
+   ```
+
+   Set Input Signal Plus back however you like.
 
 The install saves your monitor's working EDID and starts the helper at every login. macOS may show a notification that a background item was added. That item is this helper.
 
@@ -50,14 +57,14 @@ A monitor describes itself to the Mac with an EDID, which carries a product ID. 
 
 macOS reads the `0x72F2` EDID and picks a resolution, but never turns the display on. Why is not known. The monitor also turns Game Mode on by itself at times.
 
-The helper watches for the monitor to connect. When the monitor sends `0x72F2`, the helper tells macOS to use the `0x72F5` EDID saved at install instead, through the private IOKit function `IOAVServiceSetVirtualEDIDMode`. macOS forgets the swap on every reconnect and restart, so the helper keeps running. It logs each swap to `~/Library/Logs/odyssey-g8-mac-fix.log`.
+The helper watches for the monitor to connect. When the monitor sends `0x72F2`, the helper tells macOS to use the `0x72F5` EDID saved at install instead, through the private IOKit function `IOAVServiceSetVirtualEDIDMode`. As a safety net, if macOS has not turned the monitor on 5 seconds after it connects, the helper swaps in the next saved EDID, down to the 75Hz `0x7306` one. macOS forgets the swap on every reconnect and restart, so the helper keeps running. It logs each swap to `~/Library/Logs/odyssey-g8-mac-fix.log`.
 
 ## Limits
 
 - The helper relies on a private macOS function, so a macOS update can break it. If the screen stays black after an update, read the log and run `./uninstall.sh`.
 - With the fix, Game Mode runs at up to 120Hz, not 175Hz.
 - After a restart in Game Mode, the login screen can stay black. Log in on the Mac's own screen.
-- Once, the monitor also stayed black with Game Mode off (product `0x72F5`). The helper does not fix that case yet. Turning Input Signal Plus off did.
+- Once, the monitor also stayed black with Game Mode off (product `0x72F5`). The safety net covers that case only if you saved the 75Hz EDID in step 4. The monitor then runs at up to 75Hz.
 - It was tested only on a MacBook Air M3 with macOS 26.6.2 and 26.7.2, over USB-C.
 
 The EDID swap comes from [a gist by danii1](https://gist.github.com/danii1/99fa5f849a4d42807418259abfbf03d5). MIT license.
