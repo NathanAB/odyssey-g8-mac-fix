@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import IOKit
 
@@ -14,6 +15,11 @@ extension Identity {
     vendor = UInt16(edid[8]) << 8 | UInt16(edid[9])
     product = UInt16(edid[11]) << 8 | UInt16(edid[10])
   }
+
+  init(display: CGDirectDisplayID) {
+    vendor = UInt16(truncatingIfNeeded: CGDisplayVendorNumber(display))
+    product = UInt16(truncatingIfNeeded: CGDisplayModelNumber(display))
+  }
 }
 
 let samsung: UInt16 = 0x4C2D
@@ -26,7 +32,7 @@ enum Verdict: String {
   case leaveAlone = "left alone"
 }
 
-func verdict(_ edid: Data, replacement: Data) -> Verdict {
+func verdict(_ edid: Data, replacement: Data?) -> Verdict {
   if edid == replacement { return .matchesReplacement }
   guard let identity = Identity(edid: edid), identitiesToReplace.contains(identity) else { return .leaveAlone }
   return .replace
@@ -104,6 +110,15 @@ func connectedServices() -> io_iterator_t {
   return iterator
 }
 
+func onlineIdentities() -> Set<Identity> {
+  var displays = [CGDirectDisplayID](repeating: 0, count: 32)
+  var count: UInt32 = 0
+  guard CGGetOnlineDisplayList(UInt32(displays.count), &displays, &count) == .success else {
+    fail("Could not ask macOS which displays are online.")
+  }
+  return Set(displays.prefix(Int(count)).map(Identity.init(display:)))
+}
+
 func report(_ display: Display, _ verdict: Verdict) {
   say("\(display.name): \(display.identity), \(verdict.rawValue)")
 }
@@ -177,8 +192,14 @@ case "apply":
   let replacement = loadReplacement()
   eachExternalDisplay(connectedServices()) { reconcile($0, replacement: replacement) }
 case "status":
-  let replacement = loadReplacement()
-  eachExternalDisplay(connectedServices()) { report($0, verdict($0.edid, replacement: replacement)) }
+  // Before install there is no replacement EDID yet, and status still has to show whether this is the problem.
+  let replacement = FileManager.default.fileExists(atPath: replacementPath) ? loadReplacement() : nil
+  let online = onlineIdentities()
+  eachExternalDisplay(connectedServices()) { display in
+    let verdict = verdict(display.edid, replacement: replacement)
+    let isOnline = Identity(edid: display.edid).map(online.contains) ?? false
+    say("\(display.name): \(display.identity), \(verdict.rawValue), \(isOnline ? "online" : "not online")")
+  }
 case "capture":
   capture()
 case "reset":
