@@ -25,30 +25,80 @@ extension Identity {
 let samsung: UInt16 = 0x4C2D
 // The G85SB reconnects as 0x72F2 when Game Mode is on, and macOS never adds a display with that EDID.
 let identitiesToReplace: Set<Identity> = [Identity(vendor: samsung, product: 0x72F2)]
+// Highest refresh rate first. 0x72F5 (Game Mode off) runs at up to 120Hz, and 0x7306 (Input Signal Plus off) runs at up to 75Hz.
+let preferenceOrder = [Identity(vendor: samsung, product: 0x72F5), Identity(vendor: samsung, product: 0x7306)]
+
+struct SavedEDID {
+  let identity: Identity
+  let edid: Data
+}
+
+extension SavedEDID {
+  init?(edid: Data) {
+    guard edid.count % 128 == 0, let identity = Identity(edid: edid) else { return nil }
+    self.init(identity: identity, edid: edid)
+  }
+
+  var fileName: String { String(format: "%04X.bin", identity.product) }
+}
+
+func inPreferenceOrder(_ saved: [SavedEDID]) -> [SavedEDID] {
+  func rank(_ entry: SavedEDID) -> (Int, UInt16, UInt16) {
+    (preferenceOrder.firstIndex(of: entry.identity) ?? preferenceOrder.count, entry.identity.vendor, entry.identity.product)
+  }
+  return saved.sorted { rank($0) < rank($1) }
+}
 
 enum Verdict: String {
-  case matchesReplacement = "matches the replacement EDID"
+  case matchesSaved = "matches a saved EDID"
   case replace = "Game Mode identity macOS rejects"
   case leaveAlone = "left alone"
 }
 
-func verdict(_ edid: Data, replacement: Data?) -> Verdict {
-  if edid == replacement { return .matchesReplacement }
+func verdict(_ edid: Data, saved: [SavedEDID]) -> Verdict {
+  if saved.contains(where: { $0.edid == edid }) { return .matchesSaved }
   guard let identity = Identity(edid: edid), identitiesToReplace.contains(identity) else { return .leaveAlone }
   return .replace
 }
 
-let replacementPath = ProcessInfo.processInfo.environment["ODYSSEY_G8_EDID_FILE"]
-  ?? NSHomeDirectory() + "/Library/Application Support/odyssey-g8-mac-fix/replacement-edid.bin"
+let edidDirectory = URL(fileURLWithPath: ProcessInfo.processInfo.environment["ODYSSEY_G8_EDID_DIR"]
+  ?? NSHomeDirectory() + "/Library/Application Support/odyssey-g8-mac-fix/edids")
 
-func loadReplacement() -> Data {
-  guard let data = FileManager.default.contents(atPath: replacementPath) else {
-    fail("Replacement EDID not found at \(replacementPath). Run install.sh.")
+func loadSavedEDIDs() -> [SavedEDID] {
+  let files = (try? FileManager.default.contentsOfDirectory(at: edidDirectory, includingPropertiesForKeys: nil)) ?? []
+  return inPreferenceOrder(files.filter { $0.pathExtension == "bin" }.map { file in
+    guard let data = FileManager.default.contents(atPath: file.path), let saved = SavedEDID(edid: data) else {
+      fail("\(file.path) is not an EDID. Delete it, then run capture again.")
+    }
+    return saved
+  })
+}
+
+func save(_ edid: Data) -> URL {
+  guard let saved = SavedEDID(edid: edid) else {
+    fail("Could not save a \(edid.count)-byte EDID. An EDID is a multiple of 128 bytes.")
   }
-  guard !data.isEmpty, data.count % 128 == 0 else {
-    fail("Replacement EDID at \(replacementPath) is \(data.count) bytes. An EDID is a multiple of 128 bytes.")
+  let url = edidDirectory.appendingPathComponent(saved.fileName)
+  do {
+    try FileManager.default.createDirectory(at: edidDirectory, withIntermediateDirectories: true)
+    try edid.write(to: url, options: .atomic)
+  } catch {
+    fail("Could not save the EDID to \(url.path): \(error.localizedDescription)")
   }
-  return data
+  return url
+}
+
+// The first release saved one EDID as replacement-edid.bin, next to the folder that holds them now.
+func importLegacyEDID() {
+  let legacy = edidDirectory.deletingLastPathComponent().appendingPathComponent("replacement-edid.bin")
+  guard let edid = FileManager.default.contents(atPath: legacy.path) else { return }
+  say("moved \(legacy.path) to \(save(edid).path)")
+  try? FileManager.default.removeItem(at: legacy)
+}
+
+func describe(_ saved: [SavedEDID]) -> String {
+  guard !saved.isEmpty else { return "no saved EDIDs in \(edidDirectory.path)" }
+  return "saved EDIDs, in the order the helper tries them: " + saved.map(\.identity.description).joined(separator: ", ")
 }
 
 let iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW)
@@ -123,27 +173,26 @@ func report(_ display: Display, _ verdict: Verdict) {
   say("\(display.name): \(display.identity), \(verdict.rawValue)")
 }
 
-func reconcile(_ display: Display, replacement: Data) {
-  let verdict = verdict(display.edid, replacement: replacement)
+// Reads the saved EDIDs on every connect, so an EDID captured while the helper runs takes effect without a restart.
+func reconcile(_ display: Display) {
+  let saved = loadSavedEDIDs()
+  let verdict = verdict(display.edid, saved: saved)
   report(display, verdict)
   guard verdict == .replace else { return }
-  say("\(display.name): applied replacement EDID, IOReturn \(hex(setVirtualEDID(display.av, 1, replacement as CFData)))")
+  guard let replacement = saved.first else { return say("\(display.name): no saved EDID to apply") }
+  say("\(display.name): applied saved \(replacement.identity), IOReturn \(hex(setVirtualEDID(display.av, 1, replacement.edid as CFData)))")
 }
 
-func watch(replacement: Data) {
+func watch() {
   let port = IONotificationPortCreate(kIOMainPortDefault)
   CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(port).takeUnretainedValue(), .defaultMode)
-  let context = Unmanaged.passRetained(replacement as NSData).toOpaque()
   var iterator: io_iterator_t = 0
   let result = IOServiceAddMatchingNotification(
     port, kIOFirstMatchNotification, IOServiceMatching("DCPAVServiceProxy"),
-    { context, iterator in
-      let replacement = Unmanaged<NSData>.fromOpaque(context!).takeUnretainedValue() as Data
-      eachExternalDisplay(iterator) { reconcile($0, replacement: replacement) }
-    }, context, &iterator)
+    { _, iterator in eachExternalDisplay(iterator, reconcile) }, nil, &iterator)
   guard result == KERN_SUCCESS else { fail("Could not watch for displays, IOReturn \(hex(result))") }
-  say("watching for displays")
-  eachExternalDisplay(iterator) { reconcile($0, replacement: replacement) }
+  say("watching for displays, \(describe(loadSavedEDIDs()))")
+  eachExternalDisplay(iterator, reconcile)
   CFRunLoopRun()
 }
 
@@ -161,14 +210,8 @@ func capture() {
   if let identity = Identity(edid: display.edid), identitiesToReplace.contains(identity) {
     fail("Game Mode is on. Turn Game Mode off in the monitor's menu, wait for the picture, then run this again.")
   }
-  let url = URL(fileURLWithPath: replacementPath)
-  do {
-    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try display.edid.write(to: url, options: .atomic)
-  } catch {
-    fail("Could not save the EDID to \(replacementPath): \(error.localizedDescription)")
-  }
-  say("\(display.name): \(display.identity), saved to \(replacementPath)")
+  say("\(display.name): \(display.identity), saved to \(save(display.edid).path)")
+  say(describe(loadSavedEDIDs()))
 }
 
 func hex(_ result: IOReturn) -> String { String(format: "0x%08X", UInt32(bitPattern: result)) }
@@ -185,21 +228,22 @@ func fail(_ message: String) -> Never {
 // launchd points stdout at a file, which C buffers in blocks, so lines would reach the log late or never.
 setvbuf(stdout, nil, _IOLBF, 0)
 
+importLegacyEDID()
+
 switch CommandLine.arguments.dropFirst().first {
 case "watch":
-  watch(replacement: loadReplacement())
+  watch()
 case "apply":
-  let replacement = loadReplacement()
-  eachExternalDisplay(connectedServices()) { reconcile($0, replacement: replacement) }
+  eachExternalDisplay(connectedServices(), reconcile)
 case "status":
-  // Before install there is no replacement EDID yet, and status still has to show whether this is the problem.
-  let replacement = FileManager.default.fileExists(atPath: replacementPath) ? loadReplacement() : nil
+  let saved = loadSavedEDIDs()
   let online = onlineIdentities()
   eachExternalDisplay(connectedServices()) { display in
-    let verdict = verdict(display.edid, replacement: replacement)
+    let verdict = verdict(display.edid, saved: saved)
     let isOnline = Identity(edid: display.edid).map(online.contains) ?? false
     say("\(display.name): \(display.identity), \(verdict.rawValue), \(isOnline ? "online" : "not online")")
   }
+  say(describe(saved))
 case "capture":
   capture()
 case "reset":

@@ -14,7 +14,8 @@ trap 'rm -rf "$build"' EXIT
 swiftc -O -swift-version 5 -o "$build/odyssey-g8-mac-fix" odyssey-g8-mac-fix.swift
 
 # Capture before the bootout, so a capture that refuses leaves a running agent alone, like a failed build does.
-if [[ ! -f "$dest/replacement-edid.bin" ]]; then
+# The helper moves the first release's replacement-edid.bin into edids/ when it starts, so that file counts as saved.
+if ! compgen -G "$dest/edids/*.bin" >/dev/null && [[ ! -f "$dest/replacement-edid.bin" ]]; then
   "$build/odyssey-g8-mac-fix" capture
 fi
 
