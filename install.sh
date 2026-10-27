@@ -11,7 +11,7 @@ log="$HOME/Library/Logs/odyssey-g8-mac-fix.log"
 
 build="$(mktemp -d)"
 trap 'rm -rf "$build"' EXIT
-swiftc -O -o "$build/odyssey-g8-mac-fix" odyssey-g8-mac-fix.swift
+swiftc -O -swift-version 5 -o "$build/odyssey-g8-mac-fix" odyssey-g8-mac-fix.swift
 
 # Capture before the bootout, so a capture that refuses leaves a running agent alone, like a failed build does.
 if [[ ! -f "$dest/replacement-edid.bin" ]]; then

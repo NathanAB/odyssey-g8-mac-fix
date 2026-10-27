@@ -25,9 +25,9 @@ It takes about 30 seconds. Each line names a Samsung monitor that macOS saw. The
 To check the monitor's state right now, build the helper and run `status` while the screen is black in Game Mode. Building needs the Xcode Command Line Tools. To install them, run `xcode-select --install`.
 
 ```
-git clone https://github.com/nathanab/odyssey-g8-mac-fix.git
+git clone https://github.com/NathanAB/odyssey-g8-mac-fix.git
 cd odyssey-g8-mac-fix
-swiftc -O -o odyssey-g8-mac-fix odyssey-g8-mac-fix.swift
+swiftc -O -swift-version 5 -o odyssey-g8-mac-fix odyssey-g8-mac-fix.swift
 ./odyssey-g8-mac-fix status
 ```
 
@@ -73,7 +73,7 @@ You need an Apple Silicon Mac and the Xcode Command Line Tools. To install the t
 1. If you have not cloned this repository yet, run:
 
    ```
-   git clone https://github.com/nathanab/odyssey-g8-mac-fix.git
+   git clone https://github.com/NathanAB/odyssey-g8-mac-fix.git
    ```
 
 2. Connect the monitor and turn Game Mode off in the monitor's menu. Wait for the picture.
