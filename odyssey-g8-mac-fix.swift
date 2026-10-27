@@ -132,6 +132,30 @@ func watch(replacement: Data) {
   CFRunLoopRun()
 }
 
+func capture() {
+  var found: [Display] = []
+  eachExternalDisplay(connectedServices()) { display in
+    if Identity(edid: display.edid)?.vendor == samsung { found.append(display) }
+  }
+  guard let display = found.first else {
+    fail("No Samsung monitor found. Connect the monitor with Game Mode off, wait for the picture, then run this again.")
+  }
+  guard found.count == 1 else {
+    fail("Found \(found.count) Samsung monitors. Disconnect all but the Odyssey G8, then run this again.")
+  }
+  if let identity = Identity(edid: display.edid), identitiesToReplace.contains(identity) {
+    fail("Game Mode is on. Turn Game Mode off in the monitor's menu, wait for the picture, then run this again.")
+  }
+  let url = URL(fileURLWithPath: replacementPath)
+  do {
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try display.edid.write(to: url, options: .atomic)
+  } catch {
+    fail("Could not save the EDID to \(replacementPath): \(error.localizedDescription)")
+  }
+  say("\(display.name): \(display.identity), saved to \(replacementPath)")
+}
+
 func hex(_ result: IOReturn) -> String { String(format: "0x%08X", UInt32(bitPattern: result)) }
 
 func say(_ message: String, to stream: UnsafeMutablePointer<FILE> = stdout) {
@@ -155,11 +179,13 @@ case "apply":
 case "status":
   let replacement = loadReplacement()
   eachExternalDisplay(connectedServices()) { report($0, verdict($0.edid, replacement: replacement)) }
+case "capture":
+  capture()
 case "reset":
   eachExternalDisplay(connectedServices()) { display in
     guard Identity(edid: display.edid)?.vendor == samsung else { return report(display, .leaveAlone) }
     say("\(display.name): reset to the monitor's own EDID, IOReturn \(hex(setVirtualEDID(display.av, 0, nil)))")
   }
 default:
-  fail("usage: odyssey-g8-mac-fix watch | apply | status | reset")
+  fail("usage: odyssey-g8-mac-fix watch | apply | status | capture | reset")
 }
